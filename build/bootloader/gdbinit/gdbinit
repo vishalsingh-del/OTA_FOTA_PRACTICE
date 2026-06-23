@@ -1,0 +1,2 @@
+source D:/Work/OTA_FOTA_practice/build/bootloader/gdbinit/symbols
+source D:/Work/OTA_FOTA_practice/build/bootloader/gdbinit/connect

@@ -1,0 +1,18 @@
+Command: ninja all
+[1/9] Performing build step for 'bootloader'
+[1/1] C:\Windows\system32\cmd.exe /C "cd /D D:\Work\OTA_FOTA_practice\build\bootloader\esp-idf\esptool_py && C:\Users\Work\.espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:/Users/Work/esp/v5.5.2/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 bootloader 0x1000 D:/Work/OTA_FOTA_practice/build/bootloader/bootloader.bin"
+Bootloader binary size 0x66c0 bytes. 0x940 bytes (8%) free.
+[2/9] No install step for 'bootloader'
+[3/9] Completed 'bootloader'
+[4/9] Building C object esp-idf/src/CMakeFiles/__idf_src.dir/led_blink.c.obj
+[5/9] Linking C static library esp-idf\src\libsrc.a
+[6/9] Generating esp-idf/esp_system/ld/sections.ld
+[7/9] Linking CXX executable OTA_FOTA_practice.elf
+[8/9] Generating binary image from built executable
+esptool.py v4.11.0
+Creating esp32 image...
+Merged 2 ELF sections
+Successfully created esp32 image.
+Generated D:/Work/OTA_FOTA_practice/build/OTA_FOTA_practice.bin
+[9/9] C:\Windows\system32\cmd.exe /C "cd /D D:\Work\OTA_FOTA_practice\build\esp-idf\esptool_py && C:\Users\Work\.espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe C:/Users/Work/esp/v5.5.2/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app D:/Work/OTA_FOTA_practice/build/partition_table/partition-table.bin D:/Work/OTA_FOTA_practice/build/OTA_FOTA_practice.bin"
+OTA_FOTA_practice.bin binary size 0xb8150 bytes. Smallest app partition is 0x100000 bytes. 0x47eb0 bytes (28%) free.

@@ -1,0 +1,13 @@
+# Target labels
+ bootloader
+# Source files and their labels
+D:/Work/OTA_FOTA_practice/build/CMakeFiles/bootloader
+D:/Work/OTA_FOTA_practice/build/CMakeFiles/bootloader.rule
+D:/Work/OTA_FOTA_practice/build/CMakeFiles/bootloader-complete.rule
+D:/Work/OTA_FOTA_practice/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+D:/Work/OTA_FOTA_practice/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+D:/Work/OTA_FOTA_practice/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+D:/Work/OTA_FOTA_practice/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+D:/Work/OTA_FOTA_practice/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+D:/Work/OTA_FOTA_practice/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+D:/Work/OTA_FOTA_practice/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule
