@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "OTA_FOTA_practice",
-    "project_version":    "1",
+    "project_version":    "2.0.6",
     "project_path":       "D:/Work/OTA_FOTA_practice",
     "idf_path":           "C:/Users/Work/esp/v5.5.2/esp-idf",
     "build_dir":          "D:/Work/OTA_FOTA_practice/build",
@@ -1460,13 +1460,13 @@
             "dir": "D:/Work/OTA_FOTA_practice/src",
             "type": "LIBRARY",
             "lib": "__idf_src",
-            "reqs": [ "driver", "esp_wifi", "esp_event", "esp_netif", "nvs_flash", "log" ],
+            "reqs": [ "driver", "esp_wifi", "esp_event", "esp_netif", "nvs_flash", "log", "esp_https_ota" ],
             "priv_reqs": [],
             "managed_reqs": [],
             "managed_priv_reqs": [],
             "file": "D:/Work/OTA_FOTA_practice/build/esp-idf/src/libsrc.a",
-            "sources": [ "D:/Work/OTA_FOTA_practice/src/CMakeLists.txt", "D:/Work/OTA_FOTA_practice/src/led_blink.c", "D:/Work/OTA_FOTA_practice/src/led_blink.h", "D:/Work/OTA_FOTA_practice/src/main.c", "D:/Work/OTA_FOTA_practice/src/wifi_manager.c", "D:/Work/OTA_FOTA_practice/src/wifi_manager.h" ],
-            "include_dirs": []
+            "sources": [ "D:/Work/OTA_FOTA_practice/src/main.c", "D:/Work/OTA_FOTA_practice/src/wifi_manager.c", "D:/Work/OTA_FOTA_practice/src/ota.c", "D:/Work/OTA_FOTA_practice/src/led_blink.c", "D:/Work/OTA_FOTA_practice/build/cert.pem.S" ],
+            "include_dirs": [ "." ]
         },
         "tcp_transport": {
             "alias": "idf::tcp_transport",
@@ -2907,11 +2907,11 @@
             "prefix": "idf",
             "dir": "D:/Work/OTA_FOTA_practice/src",
             "lib": "__idf_src",
-            "reqs": [ "driver", "esp_wifi", "esp_event", "esp_netif", "nvs_flash", "log" ],
+            "reqs": [ "driver", "esp_wifi", "esp_event", "esp_netif", "nvs_flash", "log", "esp_https_ota" ],
             "priv_reqs": [],
             "managed_reqs": [],
             "managed_priv_reqs": [],
-            "include_dirs": []
+            "include_dirs": [ "." ]
         }
     },
     "debug_prefix_map_gdbinit": "",

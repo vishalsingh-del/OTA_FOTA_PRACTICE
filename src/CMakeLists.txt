@@ -16,7 +16,4 @@ idf_component_register(
         nvs_flash
         log
         esp_https_ota
-
-    EMBED_TXTFILES
-        "../cert.pem"
 )
