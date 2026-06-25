@@ -20,11 +20,6 @@ static int http_len = 0;
 
 #define VERSION_URL "https://192.168.31.237:8000/version.json"
 static esp_err_t http_event_handler(esp_http_client_event_t *evt);
-typedef struct
-{
-    char version[32];
-    char url[256];
-} ota_info_t;
 
 static esp_err_t download_version_info(ota_info_t *info)
 {
@@ -102,9 +97,9 @@ static esp_err_t download_version_info(ota_info_t *info)
         return ESP_FAIL;
     }
 
-    strncpy(info->version,
+    strncpy(info->version_server,
             version->valuestring,
-            sizeof(info->version) - 1);
+            sizeof(info->version_server) - 1);
 
     strncpy(info->url,
             url->valuestring,
@@ -227,12 +222,12 @@ void ota_task(void *pv)
     const esp_app_desc_t *app = esp_app_get_description();
 
     ESP_LOGI(TAG, "Current Version : %s", app->version);
-    ESP_LOGI(TAG, "Server  Version : %s", ota_info.version);
+    ESP_LOGI(TAG, "Server  Version : %s", ota_info.version_server);
 
     /*--------------------------------------------------
      * Compare versions
      *-------------------------------------------------*/
-    if (!compare_versions(app->version, ota_info.version))
+    if (!compare_versions(app->version, ota_info.version_server))
     {
         ESP_LOGI(TAG,
                  "Already running the latest firmware");

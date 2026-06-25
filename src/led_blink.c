@@ -29,10 +29,10 @@ void led_blink(void)
     // gpio_set_level(led_2, 0);
     gpio_set_level(blink_led, 1);
     printf("LED blinked\n");
-    vTaskDelay(600 / portTICK_PERIOD_MS);
+    vTaskDelay(300 / portTICK_PERIOD_MS);
     // gpio_set_level(led_1, 0);
     // gpio_set_level(led_2, 1);
     gpio_set_level(blink_led, 0);
     printf("LED off\n");
-    vTaskDelay(600 / portTICK_PERIOD_MS);
+    vTaskDelay(300 / portTICK_PERIOD_MS);
 }
