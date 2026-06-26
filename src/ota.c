@@ -201,50 +201,33 @@ static esp_err_t perform_ota(const char *url)
 }
 void ota_task(void *pv)
 {
+    ota_info_t ota_info;
+
     esp_ota_mark_app_valid_cancel_rollback();
 
-    ota_info_t ota_info = {0};
-
-    /*--------------------------------------------------
-     * Download version.json
-     *-------------------------------------------------*/
-    if (download_version_info(&ota_info) != ESP_OK)
+    while (1)
     {
-        ESP_LOGE(TAG, "Failed to download version information");
+        if (download_version_info(&ota_info) == ESP_OK)
+        {
+            const esp_app_desc_t *app = esp_app_get_description();
 
-        vTaskDelete(NULL);
-        return;
+            ESP_LOGI(TAG, "Current : %s", app->version);
+            ESP_LOGI(TAG, "Server  : %s", ota_info.version_server);
+
+            if (compare_versions(app->version,
+                                 ota_info.version_server))
+            {
+                ESP_LOGI(TAG, "New firmware found");
+
+                perform_ota(ota_info.url);
+
+                // perform_ota() restarts ESP if successful
+            }
+        }
+
+        // Wait 30 seconds before checking again
+        // vTaskDelay(pdMS_TO_TICKS(30000));
     }
-
-    /*--------------------------------------------------
-     * Read current firmware version
-     *-------------------------------------------------*/
-    const esp_app_desc_t *app = esp_app_get_description();
-
-    ESP_LOGI(TAG, "Current Version : %s", app->version);
-    ESP_LOGI(TAG, "Server  Version : %s", ota_info.version_server);
-
-    /*--------------------------------------------------
-     * Compare versions
-     *-------------------------------------------------*/
-    if (!compare_versions(app->version, ota_info.version_server))
-    {
-        ESP_LOGI(TAG,
-                 "Already running the latest firmware");
-
-        vTaskDelete(NULL);
-        return;
-    }
-
-    ESP_LOGI(TAG,
-             "New firmware available");
-
-    /*--------------------------------------------------
-     * Perform OTA
-     *-------------------------------------------------*/
-    perform_ota(ota_info.url);
-
-    vTaskDelete(NULL);
 }
 // #include "ota.h"
 // #include "cert.h"
