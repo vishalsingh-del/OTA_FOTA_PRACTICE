@@ -226,7 +226,7 @@ void ota_task(void *pv)
         }
 
         // Wait 30 seconds before checking again
-        // vTaskDelay(pdMS_TO_TICKS(30000));
+        vTaskDelay(pdMS_TO_TICKS(30000));
     }
 }
 // #include "ota.h"

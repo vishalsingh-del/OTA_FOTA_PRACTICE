@@ -1,19 +1,10 @@
-idf_component_register(
-    SRCS
-        "main.c"
-        "wifi_manager.c"
-        "ota.c"
-        "led_blink.c"
+cmake_minimum_required(VERSION 3.16)
 
-    INCLUDE_DIRS
-        "."
+# Firmware version
+set(PROJECT_VER "1.0.20")
 
-    REQUIRES
-        driver
-        esp_wifi
-        esp_event
-        esp_netif
-        nvs_flash
-        log
-        esp_https_ota
-)
+set(EXTRA_COMPONENT_DIRS ${CMAKE_SOURCE_DIR}/src)
+
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+
+project(OTA_FOTA_practice)
