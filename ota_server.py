@@ -5,27 +5,16 @@ import json
 import socket
 from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import quote
 
 PORT = 8000
-BUILD_DIR = ".pio/build"
 
 # --------------------------------------------------
-# Find firmware.bin
+# Firmware file to serve (.hex instead of .bin)
 # --------------------------------------------------
-
-firmware = None
-
-for root, dirs, files in os.walk(BUILD_DIR):
-    if "firmware.bin" in files:
-        firmware = os.path.join(root, "firmware.bin")
-        break
-
-if firmware is None:
-    print(" firmware.bin not found!")
-    exit()
-
-folder = os.path.dirname(firmware)
-filename = os.path.basename(firmware)
+# Set this to the exact filename sitting in the project root
+# (as shown in your VS Code explorer).
+HEX_FILENAME = "Tetra_Tower_RNLTonhe (1).hex"
 
 # --------------------------------------------------
 # Project Root
@@ -35,6 +24,19 @@ project_root = os.path.dirname(os.path.abspath(__file__))
 
 cert = os.path.join(project_root, "cert.pem")
 key = os.path.join(project_root, "key.pem")
+
+# --------------------------------------------------
+# Locate the .hex firmware file
+# --------------------------------------------------
+
+firmware = os.path.join(project_root, HEX_FILENAME)
+
+if not os.path.exists(firmware):
+    print(f" {HEX_FILENAME} not found in {project_root}!")
+    exit()
+
+folder = os.path.dirname(firmware)
+filename = os.path.basename(firmware)
 
 # --------------------------------------------------
 # Read PROJECT_VER from CMakeLists.txt
@@ -68,10 +70,14 @@ finally:
 # --------------------------------------------------
 # Generate version.json automatically
 # --------------------------------------------------
+# Note: URL-encode the filename since it contains a space and
+# parentheses, which aren't valid raw in a URL.
+
+encoded_filename = quote(filename)
 
 version_info = {
     "version": version,
-    "url": f"https://{ip}:{PORT}/{filename}"
+    "url": f"https://{ip}:{PORT}/{encoded_filename}"
 }
 
 with open(os.path.join(folder, "version.json"), "w") as f:
@@ -107,7 +113,7 @@ print(f"Version  : {version}")
 print()
 
 print("Firmware URL")
-print(f"https://{ip}:{PORT}/{filename}")
+print(f"https://{ip}:{PORT}/{encoded_filename}")
 
 print()
 

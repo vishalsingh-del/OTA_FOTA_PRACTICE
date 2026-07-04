@@ -6,3 +6,4 @@ phy_init,    data, phy,     0x10000,  0x1000
 factory,     app,  factory, 0x20000,  2M
 ota_0,       app,  ota_0, ,          2M
 ota_1,       app,  ota_1, ,          2M
+mydownload,  data, spiffs,  0x620000, 0x100000

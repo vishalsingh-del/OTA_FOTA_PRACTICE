@@ -1,0 +1,40 @@
+********************************************************************************
+Obsolete PIO Core v6.1.18 is used (previous was 6.1.19)
+Please remove multiple PIO Cores from a system:
+https://docs.platformio.org/en/latest/core/installation/troubleshooting.html
+********************************************************************************
+Processing esp32-s3-devkitc-1 (platform: espressif32; board: esp32-s3-devkitc-1; framework: espidf)
+--------------------------------------------------------------------------------
+Verbose mode can be enabled via `-v, --verbose` option
+CONFIGURATION: https://docs.platformio.org/page/boards/espressif32/esp32-s3-devkitc-1.html
+PLATFORM: Espressif 32 (6.12.0) > Espressif ESP32-S3-DevKitC-1-N8 (8 MB QD, No PSRAM)
+HARDWARE: ESP32S3 240MHz, 320KB RAM, 8MB Flash
+DEBUG: Current (esp-builtin) On-board (esp-builtin) External (cmsis-dap, esp-bridge, esp-prog, iot-bus-jtag, jlink, minimodule, olimex-arm-usb-ocd, olimex-arm-usb-ocd-h, olimex-arm-usb-tiny-h, olimex-jtag-tiny, tumpa)
+PACKAGES: 
+ - framework-espidf @ 3.50500.0 (5.5.0) 
+ - tool-cmake @ 3.30.2 
+ - tool-esp-rom-elfs @ 0.0.1+20241011 
+ - tool-esptoolpy @ 2.40900.250804 (4.9.0) 
+ - tool-idf @ 1.0.1 
+ - tool-mconf @ 1.4060000.20190628 (406.0.0) 
+ - tool-ninja @ 1.9.0 
+ - tool-riscv32-esp-elf-gdb @ 11.2.0+20220823 
+ - tool-xtensa-esp-elf-gdb @ 11.2.0+20230208 
+ - toolchain-esp32ulp @ 1.23800.240113 (2.38.0) 
+ - toolchain-riscv32-esp @ 14.2.0+20241119 
+ - toolchain-xtensa-esp-elf @ 14.2.0+20241119
+Reading CMake configuration...
+Warning! Flash memory size mismatch detected. Expected 8MB, found 2MB!
+Please select a proper value in your `sdkconfig.defaults` or via the `menuconfig` target!
+LDF: Library Dependency Finder -> https://bit.ly/configure-pio-ldf
+LDF Modes: Finder ~ chain, Compatibility ~ soft
+Found 0 compatible libraries
+Scanning dependencies...
+No dependencies
+Building in release mode
+Retrieving maximum program size .pio\build\esp32-s3-devkitc-1\firmware.elf
+Checking size .pio\build\esp32-s3-devkitc-1\firmware.elf
+Advanced Memory Usage is available via "PlatformIO Home > Project Inspect"
+RAM:   [=         ]  12.5% (used 41120 bytes from 327680 bytes)
+Flash: [====      ]  43.9% (used 921571 bytes from 2097152 bytes)
+========================= [SUCCESS] Took 5.13 seconds =========================
