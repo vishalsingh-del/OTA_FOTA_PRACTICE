@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include "driver/twai.h"
+#include "freertos/queue.h"
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define TAG "FW_UPDATE"
 #include <stdbool.h>
@@ -77,12 +78,143 @@ static uint8_t KEY[] = {0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A};        
 static uint8_t RESPONSE_KEY[] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5}; // sent by MCU when ready
 static uint8_t MCU_ACK_KEY[] = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55};  // per-block complete ACK
 
+// ---------------------------------------------------------------------------
+// Dedicated bootloader-response CAN RX task
+// ---------------------------------------------------------------------------
+// While FOTA owns the bus, this task is the ONLY caller of twai_receive().
+// It blocks indefinitely on twai_receive() and does nothing but filter +
+// enqueue, so it always drains the TWAI driver's internal RX queue promptly
+// -- even while the FOTA task itself is busy doing HTTP downloads or flash
+// writes. That decoupling is what avoids RX queue overflow/drops (and the
+// resulting missed or delayed bootloader responses) under dense periodic
+// CAN traffic during the HTTP download phase.
+//
+// can_receive_message() below no longer touches twai_receive() directly; it
+// just consumes frames this task has already filtered onto s_bootloader_rxq.
+// ---------------------------------------------------------------------------
+typedef struct
+{
+    uint32_t id;
+    uint8_t data[8];
+    uint8_t dlc;
+} can_frame_t;
+
+#define BOOTLOADER_RXQ_LEN 32
+#define BOOTLOADER_RX_TASK_STACK_SIZE 3072
+#define BOOTLOADER_RX_TASK_PRIORITY 6 // above fota_can_task (priority 5)
+
+static QueueHandle_t s_bootloader_rxq = NULL;
+static TaskHandle_t s_bootloader_rx_task_handle = NULL;
+
+static void can_bootloader_rx_task(void *arg)
+{
+    (void)arg;
+    twai_message_t msg;
+
+    for (;;)
+    {
+        esp_err_t ret = twai_receive(&msg, portMAX_DELAY);
+        if (ret != ESP_OK)
+        {
+            // Shouldn't happen with portMAX_DELAY outside of a driver
+            // stop/uninstall; just retry.
+            continue;
+        }
+
+        ESP_LOGD(TAG, "RX task - ID: 0x%08" PRIX32 ", Data: %02X %02X %02X %02X %02X %02X %02X %02X",
+                 msg.identifier,
+                 msg.data[0], msg.data[1], msg.data[2], msg.data[3],
+                 msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
+
+        if (msg.identifier != RESP_ID)
+        {
+            // Confirmed via logging: other nodes keep transmitting on the
+            // bus during FOTA even though gstate.can_normal_processing is
+            // false (that flag only stops OUR app from acting on traffic,
+            // it doesn't stop other ECUs from sending or the TWAI driver
+            // from receiving). Forwarding all of that into our software
+            // queue just relocates the overflow/drop problem from the
+            // driver's queue into this one -- and risks dropping real
+            // RESP_ID frames that are competing for the same slots. Drop
+            // anything that isn't a bootloader response.
+            ESP_LOGD(TAG, "RX task: ignoring non-bootloader CAN ID 0x%08" PRIX32, msg.identifier);
+            continue;
+        }
+
+        can_frame_t f = {
+            .id = msg.identifier,
+            .dlc = msg.data_length_code,
+        };
+        memcpy(f.data, msg.data, msg.data_length_code);
+
+        if (xQueueSend(s_bootloader_rxq, &f, 0) != pdTRUE)
+        {
+            ESP_LOGW(TAG, "bootloader_rxq full, dropping frame (ID 0x%08" PRIX32 ")", msg.identifier);
+        }
+    }
+}
+
+// Starts the dedicated RX task. Must be called before any code path that
+// waits on wait_for_can_response()/wait_for_block_response()/
+// can_receive_message() during FOTA.
+static bool start_bootloader_rx_task(void)
+{
+    if (s_bootloader_rx_task_handle)
+    {
+        // Already running (e.g. re-entrant call) - nothing to do.
+        return true;
+    }
+
+    s_bootloader_rxq = xQueueCreate(BOOTLOADER_RXQ_LEN, sizeof(can_frame_t));
+    if (!s_bootloader_rxq)
+    {
+        ESP_LOGE(TAG, "Failed to create bootloader RX queue");
+        return false;
+    }
+
+    BaseType_t created = xTaskCreate(
+        can_bootloader_rx_task,
+        "can_boot_rx",
+        BOOTLOADER_RX_TASK_STACK_SIZE,
+        NULL,
+        BOOTLOADER_RX_TASK_PRIORITY,
+        &s_bootloader_rx_task_handle);
+
+    if (created != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create bootloader RX task");
+        vQueueDelete(s_bootloader_rxq);
+        s_bootloader_rxq = NULL;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Bootloader RX task started");
+    return true;
+}
+
+// Stops the dedicated RX task and releases the queue. Safe to call even if
+// start_bootloader_rx_task() was never called or already stopped.
+static void stop_bootloader_rx_task(void)
+{
+    if (s_bootloader_rx_task_handle)
+    {
+        vTaskDelete(s_bootloader_rx_task_handle);
+        s_bootloader_rx_task_handle = NULL;
+    }
+    if (s_bootloader_rxq)
+    {
+        vQueueDelete(s_bootloader_rxq);
+        s_bootloader_rxq = NULL;
+    }
+    ESP_LOGI(TAG, "Bootloader RX task stopped");
+}
+
 static esp_err_t http_event_handler(esp_http_client_event_t *evt)
 {
     return ESP_OK;
 }
 
-bool wait_for_can_response(const uint8_t *expected_data, uint32_t timeout_ms);
+bool wait_for_can_response(uint32_t id, const uint8_t *expected_data, uint32_t timeout_ms);
 esp_err_t can_send_message_for_bootloading(uint32_t identifier, uint8_t *data, uint8_t data_length);
 esp_err_t can_send_for_bootloading(uint32_t identifier, uint8_t *data, uint8_t data_length);
 esp_err_t can_send_for_bootloading_with_ack(uint32_t identifier, uint8_t *data, uint8_t data_length);
@@ -274,16 +406,18 @@ static bool download_and_parse_firmware(void)
     // ---------------- Bootloader erase-wait handshake ----------------------
     ESP_LOGI(TAG, "=== Starting firmware update ===");
     can_send_message_for_bootloading(BOOT_ID, KEY, 8);
-    uint8_t boot_start[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    wait_for_can_response(boot_start, 20000);
+
     ESP_LOGI(TAG, "Waiting for bootloader status...");
     bool got_erase_success = false;
-    uint32_t start_tick = xTaskGetTickCount();
-    uint32_t timeout_ticks = pdMS_TO_TICKS(20000);
 
     ESP_LOGI(TAG, "Waiting for enter  to bootloader mode...");
-    uint8_t boot_mode_data[8] = {4, 0, 0, 0, 0, 0, 0, 0};
-    if (!wait_for_can_response(boot_mode_data, 20000))
+    // NOTE: this only confirms the MCU is alive and responding on RESP_ID.
+    // The actual status sequence (init -> flash API ready -> erase complete
+    // -> ready ACK) is interpreted by the state-machine loop right below --
+    // don't require an exact byte match here, or an early/intermediate
+    // status frame (e.g. a 0x00 padding/ack frame before "erase complete")
+    // gets rejected and we sit waiting for a frame that hasn't happened yet.
+    if (!wait_for_can_response(RESP_ID, NULL, 60000))
     {
         ESP_LOGE(TAG, "MCU did not enter bootloader mode \n");
 
@@ -292,6 +426,12 @@ static bool download_and_parse_firmware(void)
         esp_http_client_cleanup(client);
         return false;
     }
+
+    // Start the erase-sequence timeout clock now, not before the handshake
+    // above -- otherwise time spent waiting to enter bootloader mode eats
+    // into the budget for the actual erase state machine.
+    uint32_t start_tick = xTaskGetTickCount();
+    uint32_t timeout_ticks = pdMS_TO_TICKS(20000);
 
     printf("MCU is in boot loader \n");
 
@@ -355,11 +495,11 @@ static bool download_and_parse_firmware(void)
     }
 
     ESP_LOGI(TAG, "MCU is in bootloader and ready to receive frames");
-    if (!wait_for_can_response(RESPONSE_KEY, 15000))
-    {
-        ESP_LOGE(TAG, "Bootloader did not send start ACK");
-        return false;
-    }
+    // if (!wait_for_can_response(RESP_ID, RESPONSE_KEY, 15000))
+    // {
+    //     ESP_LOGE(TAG, "Bootloader did not send start ACK");
+    //     return false;
+    // }
 
     // ---------------- Stream the boot table over CAN -----------------------
     reset_line_reader();
@@ -687,7 +827,7 @@ static bool send_boot_table_over_can(void)
         }
 
         // Per-block ACK, once per block.
-        if (!wait_for_can_response(MCU_ACK_KEY, BLOCK_ACK_TIMEOUT_MS))
+        if (!wait_for_can_response(RESP_ID, MCU_ACK_KEY, BLOCK_ACK_TIMEOUT_MS))
         {
             ESP_LOGE(TAG, "No block-complete ACK after block %d", block_num);
             return false;
@@ -729,10 +869,26 @@ void firmware_update(void)
     gstate.fw_update_in_progress = true;
     gstate.can_normal_processing = false; // Disable normal handling
 
+    // Start the dedicated bootloader RX task BEFORE any CAN traffic for this
+    // FOTA session goes out. From this point on it's the sole consumer of
+    // twai_receive(), draining the driver's RX queue continuously so the
+    // HTTP download (or any other busy stretch in this task) can't cause
+    // bootloader responses to be delayed or dropped.
+    if (!start_bootloader_rx_task())
+    {
+        ESP_LOGE(TAG, "Could not start bootloader RX task, aborting FOTA");
+        gstate.fw_update_start = false;
+        gstate.fw_update_in_progress = false;
+        gstate.can_normal_processing = true;
+        esp_restart();
+        return;
+    }
+
     ESP_LOGI(TAG, "Downloading firmware...");
     if (!download_and_parse_firmware())
     {
         ESP_LOGE(TAG, "Firmware update failed");
+        stop_bootloader_rx_task();
         gstate.fw_update_start = false;
         gstate.fw_update_in_progress = false;
         gstate.can_normal_processing = true;
@@ -742,6 +898,7 @@ void firmware_update(void)
 
     ESP_LOGI(TAG, "=== Firmware update successful ===");
 
+    stop_bootloader_rx_task();
     gstate.fw_update_start = false;
     gstate.fw_update_in_progress = false;
     gstate.can_normal_processing = true;
@@ -771,44 +928,32 @@ void firmware_update(void)
 //     }
 // }
 
+// Consumes a bootloader response frame already filtered and queued by
+// can_bootloader_rx_task(). Does NOT call twai_receive() itself -- the
+// dedicated RX task owns that, so this call can never be starved by the
+// FOTA task being busy elsewhere (HTTP download, flash writes, etc).
 esp_err_t can_receive_message(uint32_t *id, uint8_t *data, TickType_t timeout_ticks)
 {
-    twai_message_t msg;
-    TickType_t start_tick = xTaskGetTickCount();
-
-    while ((xTaskGetTickCount() - start_tick) < timeout_ticks)
+    if (!s_bootloader_rxq)
     {
-        TickType_t remaining = timeout_ticks - (xTaskGetTickCount() - start_tick);
-        esp_err_t ret = twai_receive(&msg, remaining);
-
-        if (ret == ESP_OK)
-        {
-            ESP_LOGD(TAG, "Received CAN message - ID: 0x%08" PRIX32 ", extd: %d, Data: %02X %02X %02X %02X %02X %02X %02X %02X",
-                     msg.identifier, msg.extd,
-                     msg.data[0], msg.data[1], msg.data[2], msg.data[3],
-                     msg.data[4], msg.data[5], msg.data[6], msg.data[7]);
-
-            if (msg.identifier == RESP_ID)
-            {
-                *id = msg.identifier;
-                memcpy(data, msg.data, msg.data_length_code);
-                return ESP_OK;
-            }
-
-            ESP_LOGD(TAG, "Ignoring CAN ID: 0x%08" PRIX32, msg.identifier);
-        }
-        else if (ret == ESP_ERR_TIMEOUT)
-        {
-            return ESP_ERR_TIMEOUT;
-        }
-        else
-        {
-            ESP_LOGE(TAG, "CAN receive error: %s", esp_err_to_name(ret));
-            return ret;
-        }
+        ESP_LOGE(TAG, "can_receive_message() called but bootloader RX task isn't running");
+        return ESP_ERR_INVALID_STATE;
     }
 
-    return ESP_ERR_TIMEOUT;
+    can_frame_t f;
+    if (xQueueReceive(s_bootloader_rxq, &f, timeout_ticks) != pdTRUE)
+    {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    ESP_LOGD(TAG, "Dequeued CAN message - ID: 0x%08" PRIX32 ", Data: %02X %02X %02X %02X %02X %02X %02X %02X",
+             f.id,
+             f.data[0], f.data[1], f.data[2], f.data[3],
+             f.data[4], f.data[5], f.data[6], f.data[7]);
+
+    *id = f.id;
+    memcpy(data, f.data, f.dlc);
+    return ESP_OK;
 }
 
 void convert_can_frame_to_little_endian(uint8_t *can_frame)
@@ -911,54 +1056,130 @@ void analyze_memory(void)
     heap_caps_print_heap_info(MALLOC_CAP_8BIT);
 }
 
-bool wait_for_can_response(const uint8_t *expected_data, uint32_t timeout_ms)
+bool wait_for_can_response(uint32_t expected_id, const uint8_t *expected_data, uint32_t timeout_ms)
 {
-    TickType_t start_time = xTaskGetTickCount();
-    TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    uint32_t start_time = xTaskGetTickCount();
+    uint32_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+    uint32_t last_heartbeat_tick = start_time;
 
     while ((xTaskGetTickCount() - start_time) < timeout_ticks)
     {
         uint32_t received_id;
         uint8_t received_data[8] = {0};
 
-        esp_err_t ret = can_receive_message(&received_id,
-                                            received_data,
-                                            pdMS_TO_TICKS(100));
+        // Try to receive a message with a short timeout to avoid blocking too long
+        esp_err_t ret = can_receive_message(&received_id, received_data, pdMS_TO_TICKS(100));
 
         if (ret == ESP_OK)
         {
-            ESP_LOGI(TAG,
-                     "Received CAN message - ID: 0x%08X, Data: "
-                     "%02X %02X %02X %02X %02X %02X %02X %02X",
+            // Print what we received
+            ESP_LOGI(TAG, "Received CAN message - ID: 0x%08X, Data: %02X %02X %02X %02X %02X %02X %02X %02X",
                      (unsigned int)received_id,
                      received_data[0], received_data[1], received_data[2], received_data[3],
                      received_data[4], received_data[5], received_data[6], received_data[7]);
 
-            // If only waiting for the CAN frame, no data check
-            if (expected_data == NULL)
+            // Check if this is the message we're waiting for
+            if (received_id == expected_id)
             {
-                return true;
+                if (expected_data == NULL)
+                {
+                    // If no specific data expected, just matching ID is enough
+                    return true;
+                }
+                else
+                {
+                    // Compare the received data with expected data
+                    if (memcmp(received_data, expected_data, 8) == 0)
+                    {
+                        ESP_LOGI(TAG, "Got expected response on ID 0x%08X", (unsigned int)expected_id);
+                        return true;
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "ID matched but data didn't match expected response -- still waiting (elapsed %" PRIu32 " ms / %" PRIu32 " ms)",
+                                 (uint32_t)((xTaskGetTickCount() - start_time) * portTICK_PERIOD_MS), timeout_ms);
+                    }
+                }
             }
-
-            // Verify the received payload
-            if (memcmp(received_data, expected_data, 8) == 0)
-            {
-                ESP_LOGI(TAG, "Received expected CAN response");
-                return true;
-            }
-
-            ESP_LOGW(TAG, "Received frame but data did not match");
         }
         else if (ret != ESP_ERR_TIMEOUT)
         {
+            // Handle other errors (not timeout)
             ESP_LOGE(TAG, "CAN receive error: %s", esp_err_to_name(ret));
             return false;
         }
+        // If ret == ESP_ERR_TIMEOUT, just continue the loop
+
+        // Heartbeat every ~5s so a long wait is visibly still alive in the
+        // log instead of going silent between the first mismatch and the
+        // eventual timeout -- makes it obvious whether we're really still
+        // polling or something upstream (task watchdog, driver restart,
+        // exception) cut things short.
+        uint32_t now = xTaskGetTickCount();
+        if ((now - last_heartbeat_tick) * portTICK_PERIOD_MS >= 5000)
+        {
+            last_heartbeat_tick = now;
+            ESP_LOGI(TAG, "Still waiting for ID 0x%08X (elapsed %" PRIu32 " ms / %" PRIu32 " ms)",
+                     (unsigned int)expected_id,
+                     (uint32_t)((now - start_time) * portTICK_PERIOD_MS), timeout_ms);
+        }
     }
 
-    ESP_LOGE(TAG, "Timeout waiting for CAN response");
+    ESP_LOGE(TAG, "Timeout waiting for CAN response on ID 0x%08X after %" PRIu32 " ms (requested %" PRIu32 " ms)",
+             (unsigned int)expected_id,
+             (uint32_t)((xTaskGetTickCount() - start_time) * portTICK_PERIOD_MS), timeout_ms);
+    esp_restart();
     return false;
 }
+
+// bool wait_for_can_response(const uint8_t *expected_data, uint32_t timeout_ms)
+// {
+//     TickType_t start_time = xTaskGetTickCount();
+//     TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
+
+//     while ((xTaskGetTickCount() - start_time) < timeout_ticks)
+//     {
+//         uint32_t received_id;
+//         uint8_t received_data[8] = {0};
+
+//         esp_err_t ret = can_receive_message(&received_id,
+//                                             received_data,
+//                                             pdMS_TO_TICKS(100));
+
+//         if (ret == ESP_OK)
+//         {
+//             ESP_LOGI(TAG,
+//                      "Received CAN message - ID: 0x%08X, Data: "
+//                      "%02X %02X %02X %02X %02X %02X %02X %02X",
+//                      (unsigned int)received_id,
+//                      received_data[0], received_data[1], received_data[2], received_data[3],
+//                      received_data[4], received_data[5], received_data[6], received_data[7]);
+
+//             // If only waiting for the CAN frame, no data check
+//             if (expected_data == NULL)
+//             {
+//                 return true;
+//             }
+
+//             // Verify the received payload
+//             if (memcmp(received_data, expected_data, 8) == 0)
+//             {
+//                 ESP_LOGI(TAG, "Received expected CAN response");
+//                 return true;
+//             }
+
+//             ESP_LOGW(TAG, "Received frame but data did not match");
+//         }
+//         else if (ret != ESP_ERR_TIMEOUT)
+//         {
+//             ESP_LOGE(TAG, "CAN receive error: %s", esp_err_to_name(ret));
+//             return false;
+//         }
+//     }
+
+//     ESP_LOGE(TAG, "Timeout waiting for CAN response");
+//     return false;
+// }
 
 // bool wait_for_can_response(uint32_t expected_id, const uint8_t *expected_data, uint32_t timeout_ms)
 // {
