@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include "freertos/task.h"
 #include "driver/twai.h"
 #include "freertos/queue.h"
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -32,6 +33,13 @@
 #define RESP_ID 0x12EF34AA
 #define MAX_RETRIES 3
 #define BLOCK_ACK_TIMEOUT_MS 20000
+
+// Maximum words sent to the MCU as a single size+address+data transfer
+// before we split into another chunk with its own header and ACK. Keeps
+// each chunk's worst-case transfer time comfortably inside
+// BLOCK_ACK_TIMEOUT_MS and gives regular progress checkpoints instead of
+// one huge unacked stream for an entire file-block.
+#define MAX_MCU_CHUNK_WORDS 1024
 #define CAN_TEST_ID 0x123
 #define DEFAULT_FIRMWARE_URL "https://192.168.31.237:8000/Tetra_Tower_RNLTonhe%20%281%29.hex"
 
@@ -74,10 +82,10 @@ void reset_line_reader(void)
     reader_state.current_line_num = 1;
     reader_state.partition = NULL;
 }
-static uint8_t KEY[] = {0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A};          // Boot id (i have to send)
-static uint8_t RESPONSE_KEY[] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5}; // sent by MCU when ready
-static uint8_t MCU_ACK_KEY[] = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55};  // per-block complete ACK
-
+static uint8_t KEY[] = {0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A};           // Boot id (i have to send)
+static uint8_t RESPONSE_KEY[] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};  // sent by MCU when ready
+static uint8_t MCU_ACK_KEY[] = {0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55, 0x55};   // per-block complete ACK
+static uint8_t chunk_ack_key[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}; // sent by MCU when ready to receive next chunk
 // ---------------------------------------------------------------------------
 // Dedicated bootloader-response CAN RX task
 // ---------------------------------------------------------------------------
@@ -99,7 +107,7 @@ typedef struct
     uint8_t dlc;
 } can_frame_t;
 
-#define BOOTLOADER_RXQ_LEN 32
+#define BOOTLOADER_RXQ_LEN 64
 #define BOOTLOADER_RX_TASK_STACK_SIZE 3072
 #define BOOTLOADER_RX_TASK_PRIORITY 6 // above fota_can_task (priority 5)
 
@@ -495,11 +503,6 @@ static bool download_and_parse_firmware(void)
     }
 
     ESP_LOGI(TAG, "MCU is in bootloader and ready to receive frames");
-    // if (!wait_for_can_response(RESP_ID, RESPONSE_KEY, 15000))
-    // {
-    //     ESP_LOGE(TAG, "Bootloader did not send start ACK");
-    //     return false;
-    // }
 
     // ---------------- Stream the boot table over CAN -----------------------
     reset_line_reader();
@@ -627,6 +630,14 @@ static bool hex_stream_next_word(hex_stream_t *hs, uint16_t *out)
 // TWAI frames. Each logical section (header, and each block) is flushed on
 // its own frame boundary; a short trailing frame is padded with 0xFF.
 // ---------------------------------------------------------------------------
+
+// Delay inserted after every single CAN frame sent during boot-table
+// transfer. Tune this to match how fast the F28004x bootloader can actually
+// consume frames -- raise it if the MCU is dropping/missing frames because
+// they arrive faster than it can process them, lower it (or set to 0) once
+// you've confirmed the MCU keeps up at full speed.
+#define FOTA_INTER_FRAME_DELAY_MS 5
+
 typedef struct
 {
     uint8_t buf[8];
@@ -649,6 +660,10 @@ static bool frame_push_byte(can_frame_builder_t *f, uint8_t b)
         convert_can_frame_to_little_endian(frame);
         esp_err_t err = can_send_for_bootloading_with_ack(BOOT_ID, frame, 8);
         frame_reset(f);
+        if (err == ESP_OK && FOTA_INTER_FRAME_DELAY_MS > 0)
+        {
+            vTaskDelay(pdMS_TO_TICKS(FOTA_INTER_FRAME_DELAY_MS));
+        }
         return err == ESP_OK;
     }
     return true;
@@ -671,15 +686,21 @@ static bool frame_flush(can_frame_builder_t *f)
     convert_can_frame_to_little_endian(frame);
     esp_err_t err = can_send_for_bootloading_with_ack(BOOT_ID, frame, 8);
     frame_reset(f);
+    if (err == ESP_OK && FOTA_INTER_FRAME_DELAY_MS > 0)
+    {
+        vTaskDelay(pdMS_TO_TICKS(FOTA_INTER_FRAME_DELAY_MS));
+    }
     return err == ESP_OK;
 }
 
 // ---------------------------------------------------------------------------
-// Streams the whole boot table (KeyValue -> register-init words -> entry
-// point -> N blocks -> 0x0000 terminator) over CAN, per Table 4-28.
-// Blocks are ACKed individually (MCU_ACK_KEY on RESP_ID) after each block's
-// data has been fully sent; the header is sent straight through with no ACK
-// expected until the first block completes.
+// Streams the .hex file's blocks to the MCU's actual (non-standard)
+// bootloader protocol: the file is still parsed in TI Table 4-28 word
+// order (KeyValue -> register-init -> entry point -> N blocks -> 0x0000),
+// but only the block size/address/data actually get sent over CAN, using
+// the MCU's own framing (see the detailed comment inside the function).
+// Blocks are ACKed individually (MCU_ACK_KEY on RESP_ID) after each
+// block's data has been fully sent.
 // ---------------------------------------------------------------------------
 static bool send_boot_table_over_can(void)
 {
@@ -689,7 +710,31 @@ static bool send_boot_table_over_can(void)
     can_frame_builder_t fb;
     frame_reset(&fb);
 
-    // ---- 1. KeyValue word ----
+    // -------------------------------------------------------------------
+    // IMPORTANT: the MCU-side bootloader (main__1_.c) does NOT implement
+    // the generic TI Table 4-28 serial boot-table protocol. It has no
+    // concept of a KeyValue word, register-init words, or a transmitted
+    // entry point -- its jump address is hardcoded (APP_ENTRY_ADDRESS).
+    // Its receive state machine (see the `expectingAddressSizeMsg` logic)
+    // only understands:
+    //   1) one frame per block: [size_hi, size_lo, addr_31_24, addr_23_16,
+    //      addr_15_8, addr_7_0, pad, pad] (size/address big-endian)
+    //   2) then ceil(size/4) data frames, up to 4 words per frame
+    //   3) MCU_ACK_KEY (0x55x8) once the declared word count is written
+    //   4) two frames of BOOT_END_MSG (0xA5x8) to signal end-of-transfer
+    //      and trigger the jump to the application
+    //
+    // The .hex file itself is still laid out as a real TI boot table
+    // (that parsing was already correct -- no warnings, entry point
+    // decoded cleanly), so we still read the KeyValue/register-init/entry
+    // words here to stay positionally correct in the byte stream. We just
+    // never put them on the wire -- transmitting them was what caused the
+    // MCU to misinterpret the header as a bogus size+address (0x08AA
+    // words at address 0), leading to the repeated flash-write failures
+    // (the "09"/"AB 30" flood) seen earlier.
+    // -------------------------------------------------------------------
+
+    // ---- 1. KeyValue word (read only, not transmitted) ----
     uint16_t key_word;
     if (!hex_stream_next_word(&hs, &key_word))
     {
@@ -701,13 +746,8 @@ static bool send_boot_table_over_can(void)
         ESP_LOGW(TAG, "Unexpected KeyValue word 0x%04X (expected 0x%02X%02X)",
                  key_word, BOOT_TABLE_KEY_MSB, BOOT_TABLE_KEY_LSB);
     }
-    if (!frame_push_word(&fb, key_word))
-    {
-        ESP_LOGE(TAG, "CAN send failed on KeyValue word");
-        return false;
-    }
 
-    // ---- 2. Register-init words ----
+    // ---- 2. Register-init words (read only, not transmitted) ----
     for (int i = 0; i < BOOT_TABLE_REG_INIT_WORDS; i++)
     {
         uint16_t w;
@@ -716,14 +756,10 @@ static bool send_boot_table_over_can(void)
             ESP_LOGE(TAG, "Unexpected EOF reading register-init word %d", i);
             return false;
         }
-        if (!frame_push_word(&fb, w))
-        {
-            ESP_LOGE(TAG, "CAN send failed on register-init word %d", i);
-            return false;
-        }
     }
 
-    // ---- 3. Entry point (2 words) ----
+    // ---- 3. Entry point (2 words, read only -- MCU's jump address is
+    //         hardcoded, so this is purely informational/logged) ----
     uint16_t entry_hi_word, entry_lo_word;
     if (!hex_stream_next_word(&hs, &entry_hi_word) || !hex_stream_next_word(&hs, &entry_lo_word))
     {
@@ -737,28 +773,13 @@ static bool send_boot_table_over_can(void)
     uint8_t pc_7_0 = entry_lo_word & 0xFF;
     gstate.entry_point = ((uint32_t)pc_31_24 << 24) | ((uint32_t)pc_23_16 << 16) |
                          ((uint32_t)pc_15_8 << 8) | pc_7_0;
-    ESP_LOGI(TAG, "Entry point: 0x%08" PRIX32, (uint32_t)gstate.entry_point);
-
-    if (!frame_push_word(&fb, entry_hi_word) || !frame_push_word(&fb, entry_lo_word))
-    {
-        ESP_LOGE(TAG, "CAN send failed on entry point words");
-        return false;
-    }
-
-    // Header is a fixed 22 bytes (11 words); pad + flush so every block
-    // always starts cleanly on its own frame boundary.
-    if (!frame_flush(&fb))
-    {
-        ESP_LOGE(TAG, "CAN send failed flushing header frame");
-        return false;
-    }
+    ESP_LOGI(TAG, "Entry point (informational only, MCU jump address is hardcoded): 0x%08" PRIX32,
+             (uint32_t)gstate.entry_point);
 
     // ---- 4. Block loop ----
     int block_num = 0;
     while (1)
     {
-        esp_task_wdt_reset();
-
         uint16_t block_size_words;
         if (!hex_stream_next_word(&hs, &block_size_words))
         {
@@ -768,13 +789,26 @@ static bool send_boot_table_over_can(void)
 
         if (block_size_words == 0)
         {
-            // 0x0000 terminator: end of source program.
-            if (!frame_push_word(&fb, 0x0000) || !frame_flush(&fb))
+            // 0x0000 in the file marks end-of-source for the TI table
+            // format, but the MCU doesn't look for that word at all --
+            // signal completion the way it actually expects: two frames
+            // of BOOT_END_MSG (0xA5x8).
+            uint8_t end_frame[8];
+            memset(end_frame, 0xA5, sizeof(end_frame));
+            for (int i = 0; i < 2; i++)
             {
-                ESP_LOGE(TAG, "CAN send failed on end-of-source marker");
-                return false;
+                esp_err_t err = can_send_for_bootloading_with_ack(BOOT_ID, end_frame, 8);
+                if (err != ESP_OK)
+                {
+                    ESP_LOGE(TAG, "CAN send failed on end-of-transfer marker %d/2", i + 1);
+                    return false;
+                }
+                if (FOTA_INTER_FRAME_DELAY_MS > 0)
+                {
+                    vTaskDelay(pdMS_TO_TICKS(FOTA_INTER_FRAME_DELAY_MS));
+                }
             }
-            ESP_LOGI(TAG, "Sent end-of-source marker after %d block(s)", block_num);
+            ESP_LOGI(TAG, "Sent end-of-transfer marker after %d block(s)", block_num);
             break;
         }
 
@@ -790,47 +824,109 @@ static bool send_boot_table_over_can(void)
 
         ESP_LOGI(TAG, "Block %d: %u word(s) -> addr 0x%08" PRIX32, block_num, block_size_words, dest_addr);
 
-        if (!frame_push_word(&fb, block_size_words) ||
-            !frame_push_word(&fb, addr_msw) ||
-            !frame_push_word(&fb, addr_lsw))
-        {
-            ESP_LOGE(TAG, "CAN send failed on block %d header", block_num);
-            return false;
-        }
+        // The file's own block size (from the TI-format table) has no
+        // bearing on how big a single wire transfer to the MCU has to be
+        // -- the MCU protocol is just "header, then matching data, then
+        // ACK, ready for the next header." A 31,000+ word block sent as
+        // one uninterrupted stream gives no progress visibility and no
+        // recovery point if anything goes wrong partway through, and
+        // risks the MCU's own CAN receive/flash-write pipeline falling
+        // behind with nothing to checkpoint against. Split it into
+        // MAX_MCU_CHUNK_WORDS-sized sub-transfers instead, each with its
+        // own header + ACK, while still reading the same words in the
+        // same order from the file.
+        uint32_t words_remaining = block_size_words;
+        uint32_t words_sent = 0;
+        int chunk_num = 0;
 
-        for (uint16_t w = 0; w < block_size_words; w++)
+        while (words_remaining > 0)
         {
-            uint16_t data_word;
-            if (!hex_stream_next_word(&hs, &data_word))
+            uint16_t chunk_words = (words_remaining > MAX_MCU_CHUNK_WORDS)
+                                       ? MAX_MCU_CHUNK_WORDS
+                                       : (uint16_t)words_remaining;
+            uint32_t chunk_addr = dest_addr + words_sent;
+            uint16_t chunk_addr_msw = (uint16_t)((chunk_addr >> 16) & 0xFFFF);
+            uint16_t chunk_addr_lsw = (uint16_t)(chunk_addr & 0xFFFF);
+            chunk_num++;
+
+            if (block_size_words > MAX_MCU_CHUNK_WORDS)
             {
-                ESP_LOGE(TAG, "Unexpected EOF mid-block (word %u/%u of block %d)",
-                         w, block_size_words, block_num);
+                ESP_LOGI(TAG, "  Block %d chunk %d: %u word(s) -> addr 0x%08" PRIX32,
+                         block_num, chunk_num, chunk_words, chunk_addr);
+            }
+
+            // Single combined size+address frame for this chunk, sent as
+            // its own frame (the MCU reads this as one message, not
+            // concatenated with data).
+            if (!frame_push_word(&fb, chunk_words) ||
+                !frame_push_word(&fb, chunk_addr_msw) ||
+                !frame_push_word(&fb, chunk_addr_lsw) ||
+                !frame_flush(&fb))
+            {
+                ESP_LOGE(TAG, "CAN send failed on block %d chunk %d size+address frame", block_num, chunk_num);
                 return false;
             }
-            if (!frame_push_word(&fb, data_word))
+
+            bool chunk_acked_early = false;
+            for (uint16_t w = 0; w < chunk_words; w++)
             {
-                ESP_LOGE(TAG, "CAN send failed mid-block (word %u/%u of block %d)",
-                         w, block_size_words, block_num);
+                uint16_t data_word;
+                if (!hex_stream_next_word(&hs, &data_word))
+                {
+                    ESP_LOGE(TAG, "Unexpected EOF mid-chunk (word %u/%u of block %d chunk %d)",
+                             w, chunk_words, block_num, chunk_num);
+                    return false;
+                }
+                if (!frame_push_word(&fb, data_word))
+                {
+                    ESP_LOGE(TAG, "CAN send failed mid-chunk (word %u/%u of block %d chunk %d)",
+                             w, chunk_words, block_num, chunk_num);
+                    return false;
+                }
+
+                // The MCU ACKs every successful word-write with a "00..00"
+                // frame (BL_FW_WSA), not just once per chunk. We don't need
+                // those, but if we don't drain them the bootloader_rxq
+                // fills up and starts dropping frames -- including,
+                // possibly, the one real chunk-complete ACK (0x55x8) we do
+                // need, if it happens to arrive after the queue is already
+                // full. Discard the per-word acks, but watch for the real
+                // ACK in case it shows up early (race with the last word's
+                // own drain call) -- if it does, remember it instead of
+                // throwing it away.
+                uint32_t drained_id;
+                uint8_t drained_data[8];
+                while (can_receive_message(&drained_id, drained_data, 0) == ESP_OK)
+                {
+                    if (drained_id == RESP_ID && memcmp(drained_data, chunk_ack_key, 8) == 0)
+                    {
+                        chunk_acked_early = true;
+                    }
+                }
+
+                if ((w & 0x3F) == 0)
+                {
+                    vTaskDelay(pdMS_TO_TICKS(1)); // yield periodically on long chunks
+                }
+            }
+
+            // Pad + send the chunk's final (possibly partial) frame.
+            if (!frame_flush(&fb))
+            {
+                ESP_LOGE(TAG, "CAN send failed flushing block %d chunk %d", block_num, chunk_num);
                 return false;
             }
-            if ((w & 0x3F) == 0)
+
+            // Per-chunk ACK -- unless we already caught it early while
+            // draining per-word acks above.
+            if (!chunk_acked_early && !wait_for_can_response(RESP_ID, chunk_ack_key, BLOCK_ACK_TIMEOUT_MS))
             {
-                vTaskDelay(pdMS_TO_TICKS(1)); // yield periodically on long blocks
+                ESP_LOGE(TAG, "No chunk-complete ACK after block %d chunk %d", block_num, chunk_num);
+                return false;
             }
-        }
 
-        // Pad + send the block's final (possibly partial) frame.
-        if (!frame_flush(&fb))
-        {
-            ESP_LOGE(TAG, "CAN send failed flushing block %d", block_num);
-            return false;
-        }
-
-        // Per-block ACK, once per block.
-        if (!wait_for_can_response(RESP_ID, MCU_ACK_KEY, BLOCK_ACK_TIMEOUT_MS))
-        {
-            ESP_LOGE(TAG, "No block-complete ACK after block %d", block_num);
-            return false;
+            words_sent += chunk_words;
+            words_remaining -= chunk_words;
         }
     }
 
@@ -1021,6 +1117,7 @@ esp_err_t can_send_for_bootloading_with_ack(uint32_t identifier, uint8_t *data, 
     // Per-frame ACKs are not expected from the bootloader; only per-block
     // ACKs (see wait_for_can_response(RESP_ID, MCU_ACK_KEY, ...) in
     // send_boot_table_over_can()). This wrapper just transmits the frame.
+    vTaskDelay(pdMS_TO_TICKS(20)); // yield to let the RX task drain any pending acks
     return can_send_message_for_bootloading(identifier, data, data_length);
 }
 
