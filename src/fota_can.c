@@ -811,7 +811,7 @@ static bool send_boot_table_over_can(void)
             ESP_LOGI(TAG, "Sent end-of-transfer marker after %d block(s)", block_num);
             break;
         }
-
+        vTaskDelay(pdMS_TO_TICKS(100)); // yield on long blocks
         block_num++;
 
         uint16_t addr_msw, addr_lsw;
@@ -867,7 +867,7 @@ static bool send_boot_table_over_can(void)
                 return false;
             }
 
-            bool chunk_acked_early = false;
+            // bool chunk_acked_early = false;
             for (uint16_t w = 0; w < chunk_words; w++)
             {
                 uint16_t data_word;
@@ -900,7 +900,7 @@ static bool send_boot_table_over_can(void)
                 {
                     if (drained_id == RESP_ID && memcmp(drained_data, chunk_ack_key, 8) == 0)
                     {
-                        chunk_acked_early = true;
+                        // chunk_acked_early = true;
                     }
                 }
 
@@ -919,14 +919,24 @@ static bool send_boot_table_over_can(void)
 
             // Per-chunk ACK -- unless we already caught it early while
             // draining per-word acks above.
-            if (!chunk_acked_early && !wait_for_can_response(RESP_ID, chunk_ack_key, BLOCK_ACK_TIMEOUT_MS))
-            {
-                ESP_LOGE(TAG, "No chunk-complete ACK after block %d chunk %d", block_num, chunk_num);
-                return false;
-            }
-
+            // if (!chunk_acked_early && !wait_for_can_response(RESP_ID, chunk_ack_key, BLOCK_ACK_TIMEOUT_MS))
+            // {
+            //     ESP_LOGE(TAG, "No chunk-complete ACK after block %d chunk %d", block_num, chunk_num);
+            //     return false;
+            // }
+            // Expecting the final block/chunk confirmation key: MCU_ACK_KEY (0x55)
+            // if (!chunk_acked_early && !wait_for_can_response(RESP_ID, MCU_ACK_KEY, BLOCK_ACK_TIMEOUT_MS))
+            // {
+            //     ESP_LOGE(TAG, "No MCU_ACK_KEY (0x55) received after block %d chunk %d", block_num, chunk_num);
+            //     return false;
+            // }
             words_sent += chunk_words;
             words_remaining -= chunk_words;
+        }
+        if (!wait_for_can_response(RESP_ID, MCU_ACK_KEY, BLOCK_ACK_TIMEOUT_MS))
+        {
+            ESP_LOGE(TAG, "No MCU_ACK_KEY (0x55) received after block %d chunk %d", block_num, chunk_num);
+            return false;
         }
     }
 
@@ -1104,6 +1114,7 @@ esp_err_t can_send_message_for_bootloading(uint32_t identifier, uint8_t *data, u
     {
         printf("%02X ", data[i]);
     }
+    vTaskDelay(pdMS_TO_TICKS(20)); // Small delay to ensure the message is sent properly
     return twai_transmit(&msg, pdMS_TO_TICKS(10));
 }
 
