@@ -15,7 +15,7 @@ PORT = 8000
 # Set this to the exact filename sitting in the project root
 # (as shown in your VS Code explorer).
 # HEX_FILENAME = "Tetra_Tower_RNLTonhe (1).hex"
-HEX_FILENAME = "Rellay_Tetra_Tower_RNLTonhe.hex"
+HEX_FILENAME = "10ms_Tetra_Tower_RNLTonhe.hex"
 # --------------------------------------------------
 # Project Root
 # --------------------------------------------------
